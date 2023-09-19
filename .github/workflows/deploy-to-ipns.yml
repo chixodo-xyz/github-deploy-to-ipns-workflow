@@ -1,0 +1,55 @@
+name: Deploy to IPNS
+
+on: 
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  deploy-to-ipns:
+    timeout-minutes: 15
+    name: Deploy
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - name: Preparation
+      uses: actions/checkout@v3
+
+    - name: Install and prepare dependencies
+      run: |
+        mkdir -p _deployment
+
+        latest=`curl -s -o- https://api.github.com/repos/ipfs/kubo/releases/latest | grep -oP '"https.*releases/download/.*kubo_.*linux-amd64.tar.gz"' | sed 's/"//g'`
+        wget -qO- $latest | tar xz -C _deployment
+        _deployment/kubo/ipfs version
+        _deployment/kubo/ipfs init
+
+    - name: Prepare IPNS Key
+      run: |
+        echo -n "${{ secrets.IPNS_KEY }}" > _deployment/deploy-key.pem
+        ipnskey=$(_deployment/kubo/ipfs key import deploy-key --format=pem-pkcs8-cleartext _deployment/deploy-key.pem)
+        echo "IPNS CID: ${ipnskey}"
+        rm -f _deployment/deploy-key.pem
+
+    - name: Start ipfs daemon
+      run: |
+        _deployment/kubo/ipfs daemon > ipfs.log &
+        sleep 10
+        _deployment/kubo/ipfs swarm connect ${{ vars.NODE_1 }} 
+        sleep 10
+        _deployment/kubo/ipfs swarm connect ${{ vars.NODE_2 }} 
+        sleep 10
+
+    - name: Publish to ipfs
+      run: |
+        _deployment/kubo/ipfs name publish --lifetime=240h --key=deploy-key $( _deployment/kubo/ipfs add --recursive --quieter app/ )
+        
+    - name: Pin via Pint
+      run: |
+        JWTToken=$(curl -s -u ${{ secrets.PINT_USERNAME }}:${{ secrets.PINT_PASSWORD }} -X POST ${{ vars.PINT_URL }}/token | jq -r '.token')
+        curl -s -H "Authorization: Bearer $JWTToken" -X POST ${{ vars.PINT_URL }}/pins/ipns/$ipnskey | jq
+        curl -s -H "Authorization: Bearer $JWTToken" -X POST ${{ vars.PINT_URL }}/pins/ipfs/$( _deployment/kubo/ipfs add --recursive --quieter app/ ) | jq
+        while [ $(curl -s -H "Authorization: Bearer $JWTToken" -X GET ${{ vars.PINT_URL }}/pins/$( _deployment/kubo/ipfs add --recursive --quieter app/ ) | jq .peer_map[].status | grep -c '"pinned"') -eq 0 ]; do
+          echo 'Pinning in progress...'
+          sleep 10
+        done

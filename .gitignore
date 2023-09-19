@@ -1,0 +1,6 @@
+# Distribution / packaging
+_deployment/
+
+# Git und IDE
+.git
+*.sublime-workspace
